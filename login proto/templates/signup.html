@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Sign Up — FileDrive</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}"/>
+</head>
+<body class="auth-page">
+  <div class="auth-card">
+    <div class="brand">
+      <span class="brand-icon">⬡</span>
+      <span class="brand-name">FileDrive</span>
+    </div>
+    <h1 class="auth-title">Create an account</h1>
+    <p class="auth-sub">Your personal file storage, ready in seconds</p>
+
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% for category, message in messages %}
+        <div class="alert alert-{{ category }}">{{ message }}</div>
+      {% endfor %}
+    {% endwith %}
+
+    <form method="POST" action="/signup">
+      <div class="field">
+        <label for="username">Username</label>
+        <input type="text" id="username" name="username" placeholder="yourname" required autofocus/>
+      </div>
+      <div class="field">
+        <label for="email">Email</label>
+        <input type="email" id="email" name="email" placeholder="you@example.com" required/>
+      </div>
+      <div class="field">
+        <label for="password">Password <span class="hint">(min. 6 characters)</span></label>
+        <input type="password" id="password" name="password" placeholder="••••••••" required/>
+      </div>
+      <div class="field">
+        <label for="confirm_password">Confirm password</label>
+        <input type="password" id="confirm_password" name="confirm_password" placeholder="••••••••" required/>
+      </div>
+      <button type="submit" class="btn btn-primary btn-full">Create account</button>
+    </form>
+
+    <p class="auth-link">Already have an account? <a href="/login">Log in</a></p>
+  </div>
+</body>
+</html>
