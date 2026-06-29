@@ -13,26 +13,21 @@ UPLOAD_FOLDER = 'uploads'
 ALLOWED_EXTENSIONS = {'txt', 'pdf', 'png', 'jpg', 'jpeg', 'gif', 'doc', 'docx', 'zip', 'mp4', 'mp3'}
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-
-DB_HOST = os.getenv('DB_HOST', 'localhost')
-DB_NAME = os.getenv('DB_NAME', 'flask_drive')
-DB_USER = os.getenv('DB_USER', 'postgres')
-DB_PASSWORD = os.getenv('DB_PASSWORD', 'psqldd')
-DB_PORT = os.getenv('DB_PORT', '5432')
-
 
 def get_db():
-    try:
-        return psycopg2.connect(
-            host=DB_HOST,
-            database=DB_NAME,
-            user=DB_USER,
-            password=DB_PASSWORD,
-            port=DB_PORT
+    database_url = os.environ.get('DATABASE_URL')
+    if database_url:
+        conn = psycopg2.connect(database_url, sslmode='require')
+    else:
+        conn = psycopg2.connect(
+            host=os.environ.get('DB_HOST', 'localhost'),
+            database=os.environ.get('DB_NAME', 'flask_drive'),
+            user=os.environ.get('DB_USER', 'postgres'),
+            password=os.environ.get('DB_PASSWORD', ''),
+            port=os.environ.get('DB_PORT', 5432),
+            sslmode='require'
         )
-    except Exception as e:
-        raise RuntimeError(f'Unable to connect to PostgreSQL: {e}') from e
+    return conn
 
 def init_db():
     conn = get_db()
@@ -118,22 +113,26 @@ def signup():
         if password != confirm:
             flash('Passwords do not match.', 'error')
             return render_template('signup.html')
-        conn = get_db()
-        cur = conn.cursor()
-        cur.execute('SELECT id FROM users WHERE email = %s OR username = %s', (email, username))
-        if cur.fetchone():
-            flash('Email or username already taken.', 'error')
+        try:
+            conn = get_db()
+            cur = conn.cursor()
+            cur.execute('SELECT id FROM users WHERE email = %s OR username = %s', (email, username))
+            if cur.fetchone():
+                flash('Email or username already taken.', 'error')
+                cur.close(); conn.close()
+                return render_template('signup.html')
+            hashed = generate_password_hash(password)
+            cur.execute(
+                'INSERT INTO users (username, email, password) VALUES (%s, %s, %s)',
+                (username, email, hashed)
+            )
+            conn.commit()
             cur.close(); conn.close()
+            flash('Account created! Please log in.', 'success')
+            return redirect(url_for('login'))
+        except Exception as e:
+            flash(f'Database error: {str(e)}', 'error')
             return render_template('signup.html')
-        hashed = generate_password_hash(password)
-        cur.execute(
-            'INSERT INTO users (username, email, password) VALUES (%s, %s, %s)',
-            (username, email, hashed)
-        )
-        conn.commit()
-        cur.close(); conn.close()
-        flash('Account created! Please log in.', 'success')
-        return redirect(url_for('login'))
     return render_template('signup.html')
 
 @app.route('/login', methods=['GET', 'POST'])
@@ -143,16 +142,19 @@ def login():
     if request.method == 'POST':
         email    = request.form.get('email', '').strip().lower()
         password = request.form.get('password', '')
-        conn = get_db()
-        cur = conn.cursor()
-        cur.execute('SELECT id, username, password FROM users WHERE email = %s', (email,))
-        user = cur.fetchone()
-        cur.close(); conn.close()
-        if user and check_password_hash(user[2], password):
-            session['user_id']  = user[0]
-            session['username'] = user[1]
-            return redirect(url_for('dashboard'))
-        flash('Invalid email or password.', 'error')
+        try:
+            conn = get_db()
+            cur = conn.cursor()
+            cur.execute('SELECT id, username, password FROM users WHERE email = %s', (email,))
+            user = cur.fetchone()
+            cur.close(); conn.close()
+            if user and check_password_hash(user[2], password):
+                session['user_id']  = user[0]
+                session['username'] = user[1]
+                return redirect(url_for('dashboard'))
+            flash('Invalid email or password.', 'error')
+        except Exception as e:
+            flash(f'Database error: {str(e)}', 'error')
     return render_template('login.html')
 
 @app.route('/logout')
@@ -164,17 +166,21 @@ def logout():
 @app.route('/dashboard')
 @login_required
 def dashboard():
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute(
-        '''SELECT f.id, f.original_name, f.upload_date, f.file_size
-           FROM files f
-           WHERE f.uploaded_by = %s
-           ORDER BY f.upload_date DESC''',
-        (session['user_id'],)
-    )
-    files = cur.fetchall()
-    cur.close(); conn.close()
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute(
+            '''SELECT f.id, f.original_name, f.upload_date, f.file_size
+               FROM files f
+               WHERE f.uploaded_by = %s
+               ORDER BY f.upload_date DESC''',
+            (session['user_id'],)
+        )
+        files = cur.fetchall()
+        cur.close(); conn.close()
+    except Exception as e:
+        flash(f'Database error: {str(e)}', 'error')
+        files = []
     return render_template('dashboard.html', files=files, username=session['username'])
 
 @app.route('/upload', methods=['POST'])
@@ -194,52 +200,72 @@ def upload():
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_')
     saved_name = f"{session['user_id']}_{timestamp}{original_name}"
     filepath = os.path.join(app.config['UPLOAD_FOLDER'], saved_name)
+    os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
     file.save(filepath)
     size = os.path.getsize(filepath)
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute(
-        'INSERT INTO files (filename, original_name, uploaded_by, file_size) VALUES (%s, %s, %s, %s)',
-        (saved_name, original_name, session['user_id'], size)
-    )
-    conn.commit()
-    cur.close(); conn.close()
-    flash(f'"{original_name}" uploaded successfully.', 'success')
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute(
+            'INSERT INTO files (filename, original_name, uploaded_by, file_size) VALUES (%s, %s, %s, %s)',
+            (saved_name, original_name, session['user_id'], size)
+        )
+        conn.commit()
+        cur.close(); conn.close()
+        flash(f'"{original_name}" uploaded successfully.', 'success')
+    except Exception as e:
+        flash(f'Upload error: {str(e)}', 'error')
     return redirect(url_for('dashboard'))
 
 @app.route('/download/<int:file_id>')
 @login_required
 def download(file_id):
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute('SELECT filename, original_name, uploaded_by FROM files WHERE id = %s', (file_id,))
-    file = cur.fetchone()
-    cur.close(); conn.close()
-    if not file:
-        flash('File not found.', 'error')
-        return redirect(url_for('dashboard'))
-    if file[2] != session['user_id']:
-        flash('Access denied.', 'error')
-        return redirect(url_for('dashboard'))
-
-    file_path = os.path.join(app.config['UPLOAD_FOLDER'], file[0])
-    if not os.path.exists(file_path):
-        flash('The uploaded file is missing from the server.', 'error')
-        return redirect(url_for('dashboard'))
-
-    return send_from_directory(app.config['UPLOAD_FOLDER'], file[0], as_attachment=True, download_name=file[1])
-
-
-def initialize_app():
     try:
-        init_db()
-        print('Database tables ready.')
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute('SELECT filename, original_name, uploaded_by FROM files WHERE id = %s', (file_id,))
+        file = cur.fetchone()
+        cur.close(); conn.close()
+        if not file:
+            flash('File not found.', 'error')
+            return redirect(url_for('dashboard'))
+        if file[2] != session['user_id']:
+            flash('Access denied.', 'error')
+            return redirect(url_for('dashboard'))
+        return send_from_directory(
+            app.config['UPLOAD_FOLDER'], file[0],
+            as_attachment=True, download_name=file[1]
+        )
     except Exception as e:
-        print(f'Database initialization failed: {e}')
+        flash(f'Download error: {str(e)}', 'error')
+        return redirect(url_for('dashboard'))
 
-
-initialize_app()
-
+@app.route('/delete/<int:file_id>', methods=['POST'])
+@login_required
+def delete(file_id):
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute('SELECT filename, uploaded_by FROM files WHERE id = %s', (file_id,))
+        file = cur.fetchone()
+        if not file or file[1] != session['user_id']:
+            flash('File not found or access denied.', 'error')
+            cur.close(); conn.close()
+            return redirect(url_for('dashboard'))
+        filepath = os.path.join(app.config['UPLOAD_FOLDER'], file[0])
+        if os.path.exists(filepath):
+            os.remove(filepath)
+        cur.execute('DELETE FROM files WHERE id = %s', (file_id,))
+        conn.commit()
+        cur.close(); conn.close()
+        flash('File deleted.', 'success')
+    except Exception as e:
+        flash(f'Delete error: {str(e)}', 'error')
+    return redirect(url_for('dashboard'))
 
 if __name__ == '__main__':
-    app.run(debug=False, host='0.0.0.0', port=5000)
+    os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+    init_db()
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)), debug=False)
+
+
